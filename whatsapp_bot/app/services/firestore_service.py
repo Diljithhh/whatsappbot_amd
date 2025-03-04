@@ -14,16 +14,19 @@ if firebase_creds_base64:
 else:
     raise ValueError("Firebase credentials not found in environment variable.")
 
-def is_partner_registered(phone_number: str) -> bool:
-    """Check if a phone number exists in the partners collection."""
-    doc_ref = db.collection("partners").document(phone_number)
-    doc = doc_ref.get()
-    return doc.exists
+# def is_partner_registered(phone_number: str) -> bool:
+#     """Check if a phone number exists in the partners collection."""
+#     doc_ref = db.collection("partners").document(phone_number)
+#     doc = doc_ref.get()
+#     return doc.exists
 
-def get_partner_name(phone_number: str) -> str:
-    """Retrieve partner name by phone number."""
-    doc_ref = db.collection("partners").document(phone_number)
-    doc = doc_ref.get()
-    if doc.exists:
-        return doc.to_dict().get("name", "Partner")
-    return None
+def get_partner_greeting(phone_number: str) -> str:
+    """Fetch partner's name by phone number and return a greeting message."""
+    query = db.collection("partners").where("contactNumber", "==", phone_number).limit(1).get()
+
+    if query:
+        partner_name = query[0].to_dict().get("partnerName", "Partner")
+        return f"Hi {partner_name}!"
+
+    return "Hi! Your number is not registered as a partner."
+

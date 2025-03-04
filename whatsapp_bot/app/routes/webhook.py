@@ -10,7 +10,7 @@ import hmac
 import hashlib
 from datetime import datetime
 from typing import Dict
-from whatsapp_bot.app.services.sessions import SessionManager as session_manager
+from whatsapp_bot.app.services.sessions import SessionManager 
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -72,7 +72,9 @@ async def webhook_handler(request: Request):
         logger.info(f"Processing message from {phone_number}: {message_text}")
 
         # Fetch session data
-        session = session_manager.get_session(phone_number)
+        session = SessionManager().get_session(phone_number)
+
+
 
         # Check if the user is a registered partner
         if "partner_info" not in session:

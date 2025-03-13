@@ -242,7 +242,7 @@ async def get_media_url(media_id: str):
         }
 
         logger.info(f"Requesting media URL for media_id: {media_id}")
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:  # Increase timeout
             response = await client.get(url, headers=headers)
             response.raise_for_status()
 
@@ -250,6 +250,8 @@ async def get_media_url(media_id: str):
             logger.info(f"Media data received: {media_data}")
 
             media_url = media_data.get("url")
+            mime_type = media_data.get("mime_type", "image/jpeg")
+            file_size = media_data.get("file_size", 0)
 
             if not media_url:
                 logger.error(f"Media URL not found in response: {media_data}")
@@ -258,15 +260,13 @@ async def get_media_url(media_id: str):
                     "message": "Media URL not found in response"
                 }
 
-            # Verify the URL is accessible
-            logger.info(f"Verifying media URL: {media_url}")
-            media_response = await client.get(media_url, headers=headers)
-            media_response.raise_for_status()
-
-            # Return the URL (we'll download it in the firestore service)
+            # Return the URL and additional metadata
             return {
                 "status": "success",
-                "url": media_url
+                "url": media_url,
+                "mime_type": mime_type,
+                "file_size": file_size,
+                "media_id": media_id
             }
 
     except httpx.HTTPStatusError as e:

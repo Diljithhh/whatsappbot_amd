@@ -158,12 +158,16 @@ async def handle_image_message(message, phone_number, session):
         media_url_result = await get_media_url(image_id)
 
         if media_url_result.get("status") == "error":
-            logger.error(f"Error getting media URL: {media_url_result.get('message')}")
+            error_message = media_url_result.get('message')
+            logger.error(f"Error getting media URL: {error_message}")
             await send_whatsapp_message(
                 phone_number,
                 "Sorry, I couldn't process your image. Please try again."
             )
-            return {"status": "error", "message": media_url_result.get("message")}
+            return {"status": "error", "message": error_message}
+
+        # Log media information for debugging
+        logger.info(f"Media information: mime_type={media_url_result.get('mime_type')}, file_size={media_url_result.get('file_size')}")
 
         # Store the image in Firestore
         result = await store_image_in_firestore(
@@ -181,13 +185,22 @@ async def handle_image_message(message, phone_number, session):
             )
             return {"status": "success", "message": "Image uploaded successfully"}
         else:
-            # Send error message
-            logger.error(f"Error storing image: {result.get('message')}")
+            # Send error message with more details
+            error_message = result.get('message')
+            logger.error(f"Error storing image: {error_message}")
+
+            # Send a more user-friendly message
+            user_message = "Sorry, there was an error uploading your image. Please try again later."
+            if "download" in error_message.lower():
+                user_message = "Sorry, I had trouble downloading your image. Please try sending it again with a smaller file size."
+            elif "storage" in error_message.lower():
+                user_message = "Sorry, I had trouble saving your image to our storage. Our team has been notified of this issue."
+
             await send_whatsapp_message(
                 phone_number,
-                f"Sorry, there was an error uploading your image: {result.get('message')}"
+                user_message
             )
-            return {"status": "error", "message": result.get("message")}
+            return {"status": "error", "message": error_message}
 
     except Exception as e:
         logger.error(f"Error handling image message: {e}")

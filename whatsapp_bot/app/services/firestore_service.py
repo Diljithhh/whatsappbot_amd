@@ -7,6 +7,8 @@ from datetime import datetime
 import requests
 from io import BytesIO
 import logging
+import time
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -100,19 +102,74 @@ async def store_image_in_firestore(phone_number: str, image_url: str, image_id: 
             }
 
         logger.info(f"Downloading image from WhatsApp for phone_number: {phone_number}")
-        # Download the image from WhatsApp
-        try:
-            response = requests.get(image_url, timeout=30)  # Add timeout
-            response.raise_for_status()  # Raise exception for non-200 responses
-        except requests.RequestException as e:
-            logger.error(f"Failed to download image: {str(e)}")
+
+        # Get WhatsApp API key for authorization
+        api_key = os.getenv("WHATSAPP_API_KEY")
+        if not api_key:
+            logger.error("Missing WhatsApp API key")
             return {
                 "status": "error",
-                "message": f"Failed to download image: {str(e)}"
+                "message": "Missing WhatsApp API configuration"
             }
 
-        if not response.content:
-            logger.error("Downloaded image has no content")
+        # Include the authorization header when downloading the image
+        headers = {
+            "Authorization": f"Bearer {api_key}"
+        }
+
+        # Try to download the image with retries
+        max_retries = 3
+        retry_delay = 2  # seconds
+        image_content = None
+
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Download attempt {attempt + 1} for image_id: {image_id}")
+
+                # Try using httpx for async download
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.get(
+                        image_url,
+                        headers=headers,
+                        follow_redirects=True  # Follow redirects automatically
+                    )
+                    response.raise_for_status()
+
+                    # Check content length
+                    content_length = response.headers.get('content-length')
+                    if content_length and int(content_length) == 0:
+                        logger.warning(f"Image has zero content length on attempt {attempt + 1}")
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            continue
+                        else:
+                            return {
+                                "status": "error",
+                                "message": "Image has zero content length after multiple attempts"
+                            }
+
+                    image_content = response.content
+                    if image_content and len(image_content) > 0:
+                        logger.info(f"Successfully downloaded image on attempt {attempt + 1}, size: {len(image_content)} bytes")
+                        break
+                    else:
+                        logger.warning(f"Empty image content on attempt {attempt + 1}")
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+
+            except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                logger.error(f"Failed to download image on attempt {attempt + 1}: {str(e)}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying download in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    return {
+                        "status": "error",
+                        "message": f"Failed to download image after {max_retries} attempts: {str(e)}"
+                    }
+
+        if not image_content or len(image_content) == 0:
+            logger.error("Downloaded image has no content after all attempts")
             return {
                 "status": "error",
                 "message": "Downloaded image has no content"
@@ -128,7 +185,7 @@ async def store_image_in_firestore(phone_number: str, image_url: str, image_id: 
         try:
             blob = bucket.blob(f"partner_images/{filename}")
             blob.upload_from_string(
-                response.content,
+                image_content,
                 content_type=response.headers.get('content-type', 'image/jpeg')
             )
 

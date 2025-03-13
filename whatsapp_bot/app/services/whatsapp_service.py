@@ -223,32 +223,43 @@ async def get_media_url(media_id: str):
     Returns:
         dict: Status and URL of the media
     """
-    phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
-    api_key = os.getenv("WHATSAPP_API_KEY")
-
-    url = f"https://graph.facebook.com/v17.0/{media_id}"
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-
     try:
+        phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+        api_key = os.getenv("WHATSAPP_API_KEY")
+
+        if not api_key or not phone_number_id:
+            logger.error("Missing WhatsApp API key or phone number ID")
+            return {
+                "status": "error",
+                "message": "Missing WhatsApp API configuration"
+            }
+
+        url = f"https://graph.facebook.com/v17.0/{media_id}"
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+
+        logger.info(f"Requesting media URL for media_id: {media_id}")
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
 
             media_data = response.json()
+            logger.info(f"Media data received: {media_data}")
+
             media_url = media_data.get("url")
 
             if not media_url:
+                logger.error(f"Media URL not found in response: {media_data}")
                 return {
                     "status": "error",
                     "message": "Media URL not found in response"
                 }
 
-            # Now we need to download the actual media using the URL
-            # The URL requires the same authorization
+            # Verify the URL is accessible
+            logger.info(f"Verifying media URL: {media_url}")
             media_response = await client.get(media_url, headers=headers)
             media_response.raise_for_status()
 

@@ -74,6 +74,13 @@ async def store_image_in_firestore(phone_number: str, image_url: str, image_id: 
         dict: Status of the operation
     """
     try:
+        if not image_url or not image_id:
+            logger.error(f"Missing image URL or ID: url={image_url}, id={image_id}")
+            return {
+                "status": "error",
+                "message": "Missing image URL or ID"
+            }
+
         # First verify this is a registered partner
         if not is_partner_registered(phone_number):
             logger.error(f"Attempted to store image for non-partner: {phone_number}")
@@ -94,12 +101,21 @@ async def store_image_in_firestore(phone_number: str, image_url: str, image_id: 
 
         logger.info(f"Downloading image from WhatsApp for phone_number: {phone_number}")
         # Download the image from WhatsApp
-        response = requests.get(image_url)
-        if response.status_code != 200:
-            logger.error(f"Failed to download image: {response.status_code}")
+        try:
+            response = requests.get(image_url, timeout=30)  # Add timeout
+            response.raise_for_status()  # Raise exception for non-200 responses
+        except requests.RequestException as e:
+            logger.error(f"Failed to download image: {str(e)}")
             return {
                 "status": "error",
-                "message": f"Failed to download image: {response.status_code}"
+                "message": f"Failed to download image: {str(e)}"
+            }
+
+        if not response.content:
+            logger.error("Downloaded image has no content")
+            return {
+                "status": "error",
+                "message": "Downloaded image has no content"
             }
 
         # Generate a unique filename
@@ -109,29 +125,43 @@ async def store_image_in_firestore(phone_number: str, image_url: str, image_id: 
 
         logger.info(f"Uploading image to Firebase Storage: {filename}")
         # Upload to Firebase Storage
-        blob = bucket.blob(f"partner_images/{filename}")
-        blob.upload_from_string(
-            response.content,
-            content_type=response.headers.get('content-type', 'image/jpeg')
-        )
+        try:
+            blob = bucket.blob(f"partner_images/{filename}")
+            blob.upload_from_string(
+                response.content,
+                content_type=response.headers.get('content-type', 'image/jpeg')
+            )
 
-        # Make the blob publicly accessible
-        blob.make_public()
+            # Make the blob publicly accessible
+            blob.make_public()
+        except Exception as e:
+            logger.error(f"Failed to upload image to Firebase Storage: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Failed to upload image to storage: {str(e)}"
+            }
 
         logger.info(f"Storing image metadata in Firestore for phone_number: {phone_number}")
         # Store metadata in Firestore
-        photos_collection = partner_doc_ref.collection("photos")
-        photo_doc = photos_collection.document()
+        try:
+            photos_collection = partner_doc_ref.collection("photos")
+            photo_doc = photos_collection.document()
 
-        photo_data = {
-            "imageId": image_id,
-            "caption": caption or "",
-            "uploadedAt": firestore.SERVER_TIMESTAMP,
-            "storageUrl": blob.public_url,
-            "filename": filename
-        }
+            photo_data = {
+                "imageId": image_id,
+                "caption": caption or "",
+                "uploadedAt": firestore.SERVER_TIMESTAMP,
+                "storageUrl": blob.public_url,
+                "filename": filename
+            }
 
-        photo_doc.set(photo_data)
+            photo_doc.set(photo_data)
+        except Exception as e:
+            logger.error(f"Failed to store image metadata in Firestore: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Failed to store image metadata: {str(e)}"
+            }
 
         logger.info(f"Image successfully stored for phone_number: {phone_number}")
         return {

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Request, Response, HTTPException
-from whatsapp_bot.  app.services.firestore_service import get_partner_greeting, store_image_in_firestore
+from whatsapp_bot.  app.services.firestore_service import get_partner_greeting, store_image_in_firestore, is_partner_registered
 from whatsapp_bot.app.services.nlp_service import DealerAgent
 from whatsapp_bot. app.services.whatsapp_service import send_whatsapp_message, send_service_menu, send_button_message
 import json
@@ -71,6 +71,21 @@ async def webhook_handler(request: Request):
         # Fetch session data
         session = SessionManager().get_session(phone_number)
 
+        # Check if partner_info is not in session, verify partner status
+        if "partner_info" not in session:
+            logger.info(f"Checking partner status for phone_number: {phone_number}")
+            is_partner = is_partner_registered(phone_number)
+
+            if is_partner:
+                # Get partner greeting to extract name
+                greeting_message = get_partner_greeting(phone_number)
+                partner_name = greeting_message[3:-1]  # Remove "Hi " and "!"
+                session["partner_info"] = {"name": partner_name}
+                logger.info(f"Partner verified: {partner_name} for phone_number: {phone_number}")
+            else:
+                session["partner_info"] = None
+                logger.info(f"Not a registered partner: {phone_number}")
+
         # Check if this is an image message
         if message_type == "image":
             return await handle_image_message(message, phone_number, session)
@@ -86,17 +101,6 @@ async def webhook_handler(request: Request):
         # Check if the user is in a specific flow (like product request)
         if session.get("current_flow") == "product_request":
             return await handle_product_request_flow(message_text, phone_number, session)
-
-        # Check if the user is a registered partner
-        if "partner_info" not in session:
-            greeting_message = get_partner_greeting(phone_number)
-
-            # Extract partner name from the response
-            if greeting_message.startswith("Hi "):  # Means partner exists
-                partner_name = greeting_message[3:-1]  # Remove "Hi " and "!"
-                session["partner_info"] = {"name": partner_name}
-            else:
-                session["partner_info"] = None  # Not a registered partner
 
         # Generate response
         if session["partner_info"]:
@@ -134,6 +138,8 @@ async def handle_image_message(message, phone_number, session):
             image_data = message.get("image", {})
             image_id = image_data.get("id")
             image_caption = message.get("caption", "")
+
+            logger.info(f"Processing image upload for phone_number: {phone_number}, image_id: {image_id}")
 
             # Get image URL from WhatsApp
             # We need to download the media from WhatsApp's servers
@@ -185,8 +191,12 @@ async def handle_image_message(message, phone_number, session):
                 return {"status": "error", "message": result.get("message")}
         else:
             # User sent an image without being in image upload flow
-            # Check if they're a registered partner
+            # Check if they're a registered partner - we should already have this info from the main handler
+            logger.info(f"Image received from phone_number: {phone_number}, partner_info in session: {session.get('partner_info') is not None}")
+
+            # Now check if partner_info exists and is not None
             if session.get("partner_info"):
+                logger.info(f"Partner info found in session for phone_number: {phone_number}")
                 # Ask if they want to save this image
                 buttons = [
                     {"id": "yes_save_image", "title": "Yes, Save It"},
@@ -205,6 +215,7 @@ async def handle_image_message(message, phone_number, session):
                 return {"status": "success", "message": "Asked about saving image"}
             else:
                 # Not a registered partner
+                logger.info(f"No partner info in session for phone_number: {phone_number}")
                 await send_whatsapp_message(
                     phone_number,
                     "I noticed you sent an image, but you're not registered as a partner. Please contact our sales team to register."
@@ -342,6 +353,18 @@ async def handle_interactive_response(message, phone_number):
             elif button_id == "yes_save_image":
                 # User wants to save the image they sent
                 if "temp_image_id" in session:
+                    # Verify the user is a registered partner - should already be in session
+                    if not session.get("partner_info"):
+                        logger.info(f"Attempted to save image but not a registered partner: {phone_number}")
+                        await send_whatsapp_message(
+                            phone_number,
+                            "Sorry, you need to be a registered partner to save images. Please contact our sales team to register."
+                        )
+                        # Clean up the session
+                        session.pop("temp_image_id", None)
+                        session.pop("temp_image_caption", None)
+                        return {"status": "error", "message": "Not a registered partner"}
+
                     # Set the session to image upload flow
                     session["current_flow"] = "image_upload"
 

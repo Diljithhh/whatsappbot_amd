@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Request, Response, HTTPException
-from whatsapp_bot.  app.services.firestore_service import get_partner_greeting
+from whatsapp_bot.  app.services.firestore_service import get_partner_greeting, store_image_in_firestore
 from whatsapp_bot.app.services.nlp_service import DealerAgent
 from whatsapp_bot. app.services.whatsapp_service import send_whatsapp_message, send_service_menu, send_button_message
 import json
@@ -66,17 +66,22 @@ async def webhook_handler(request: Request):
 
         message = messages[0]
         phone_number = message["from"]
+        message_type = message.get("type", "text")
+
+        # Fetch session data
+        session = SessionManager().get_session(phone_number)
+
+        # Check if this is an image message
+        if message_type == "image":
+            return await handle_image_message(message, phone_number, session)
 
         # Check if this is an interactive message response
-        if message.get("type") == "interactive":
+        if message_type == "interactive":
             return await handle_interactive_response(message, phone_number)
 
         # Handle text messages
         message_text = message["text"]["body"].lower()
         logger.info(f"Processing message from {phone_number}: {message_text}")
-
-        # Fetch session data
-        session = SessionManager().get_session(phone_number)
 
         # Check if the user is in a specific flow (like product request)
         if session.get("current_flow") == "product_request":
@@ -120,6 +125,100 @@ async def webhook_handler(request: Request):
         logger.error(f"Error processing webhook: {e}")
         return {"status": "error", "message": str(e)}
 
+async def handle_image_message(message, phone_number, session):
+    """Handle incoming image messages"""
+    try:
+        # Check if the user is in image upload flow
+        if session.get("current_flow") == "image_upload":
+            # Extract image data
+            image_data = message.get("image", {})
+            image_id = image_data.get("id")
+            image_caption = message.get("caption", "")
+
+            # Get image URL from WhatsApp
+            # We need to download the media from WhatsApp's servers
+            # This requires a separate API call which we'll implement in the whatsapp_service.py
+            from whatsapp_bot.app.services.whatsapp_service import get_media_url
+
+            # Get the media URL
+            media_url_result = await get_media_url(image_id)
+
+            if media_url_result.get("status") == "error":
+                await send_whatsapp_message(
+                    phone_number,
+                    "Sorry, I couldn't process your image. Please try again."
+                )
+                return {"status": "error", "message": media_url_result.get("message")}
+
+            # Store the image in Firestore
+            result = await store_image_in_firestore(
+                phone_number,
+                media_url_result.get("url"),
+                image_id,
+                image_caption
+            )
+
+            if result.get("status") == "success":
+                # Send success message
+                await send_whatsapp_message(
+                    phone_number,
+                    "Your image has been uploaded successfully! Would you like to upload another image?"
+                )
+
+                # Ask if they want to upload more
+                buttons = [
+                    {"id": "upload_more", "title": "Upload More"},
+                    {"id": "done_uploading", "title": "Done"}
+                ]
+                await send_button_message(
+                    phone_number,
+                    "Would you like to upload more images?",
+                    buttons
+                )
+                return {"status": "success", "message": "Image uploaded successfully"}
+            else:
+                # Send error message
+                await send_whatsapp_message(
+                    phone_number,
+                    f"Sorry, there was an error uploading your image: {result.get('message')}"
+                )
+                return {"status": "error", "message": result.get("message")}
+        else:
+            # User sent an image without being in image upload flow
+            # Check if they're a registered partner
+            if session.get("partner_info"):
+                # Ask if they want to save this image
+                buttons = [
+                    {"id": "yes_save_image", "title": "Yes, Save It"},
+                    {"id": "no_dont_save", "title": "No, Don't Save"}
+                ]
+                await send_button_message(
+                    phone_number,
+                    "I noticed you sent an image. Would you like to save it to your partner account?",
+                    buttons
+                )
+
+                # Store the image ID temporarily in the session
+                session["temp_image_id"] = message.get("image", {}).get("id")
+                session["temp_image_caption"] = message.get("caption", "")
+
+                return {"status": "success", "message": "Asked about saving image"}
+            else:
+                # Not a registered partner
+                await send_whatsapp_message(
+                    phone_number,
+                    "I noticed you sent an image, but you're not registered as a partner. Please contact our sales team to register."
+                )
+                return {"status": "success", "message": "Non-partner image notification sent"}
+
+    except Exception as e:
+        logger.error(f"Error handling image message: {e}")
+        await send_whatsapp_message(
+            phone_number,
+            "Sorry, I encountered an error processing your image. Please try again later."
+        )
+        return {"status": "error", "message": str(e)}
+
 async def handle_interactive_response(message, phone_number):
     """Handle responses from interactive messages"""
     try:
@@ -137,6 +236,9 @@ async def handle_interactive_response(message, phone_number):
 
             # Handle different service selections
             if selected_id == "upload_product_images":
+                # Set the session to image upload flow
+                session["current_flow"] = "image_upload"
+
                 # Use buttons to confirm upload
                 buttons = [
                     {"id": "yes_upload", "title": "Yes, Upload Now"},
@@ -200,13 +302,115 @@ async def handle_interactive_response(message, phone_number):
 
             # Handle different button responses
             if button_id == "yes_upload":
-                response = "Great! Please send your product images as attachments."
+                # Set the session to image upload flow
+                session["current_flow"] = "image_upload"
+
+                response = "Great! Please send your product images as attachments. You can also add a caption to describe the image."
                 await send_whatsapp_message(phone_number, response)
                 return {"status": "success", "message": response}
 
+            elif button_id == "upload_more":
+                # Keep the session in image upload flow
+                session["current_flow"] = "image_upload"
+
+                response = "Please send your next image."
+                await send_whatsapp_message(phone_number, response)
+                return {"status": "success", "message": response}
+
+            elif button_id == "done_uploading":
+                # Exit the image upload flow
+                session.pop("current_flow", None)
+
+                response = "Thank you for uploading your images. Is there anything else I can help you with?"
+                await send_whatsapp_message(phone_number, response)
+
+                # Send the main menu again
+                await send_service_menu(phone_number, "AMD Partner Services")
+                return {"status": "success", "message": "Service menu sent"}
+
             elif button_id == "no_cancel" or button_id == "back_to_menu":
+                # Clear any ongoing flows
+                session.pop("current_flow", None)
+
                 response = "No problem. Is there anything else I can help you with?"
                 await send_whatsapp_message(phone_number, response)
+
+                # Send the main menu again
+                await send_service_menu(phone_number, "AMD Partner Services")
+                return {"status": "success", "message": "Service menu sent"}
+
+            elif button_id == "yes_save_image":
+                # User wants to save the image they sent
+                if "temp_image_id" in session:
+                    # Set the session to image upload flow
+                    session["current_flow"] = "image_upload"
+
+                    # Process the image
+                    from whatsapp_bot.app.services.whatsapp_service import get_media_url
+
+                    # Get the media URL
+                    media_url_result = await get_media_url(session["temp_image_id"])
+
+                    if media_url_result.get("status") == "error":
+                        await send_whatsapp_message(
+                            phone_number,
+                            "Sorry, I couldn't process your image. Please try again."
+                        )
+                        return {"status": "error", "message": media_url_result.get("message")}
+
+                    # Store the image in Firestore
+                    result = await store_image_in_firestore(
+                        phone_number,
+                        media_url_result.get("url"),
+                        session["temp_image_id"],
+                        session.get("temp_image_caption", "")
+                    )
+
+                    # Clean up the session
+                    session.pop("temp_image_id", None)
+                    session.pop("temp_image_caption", None)
+
+                    if result.get("status") == "success":
+                        # Send success message
+                        await send_whatsapp_message(
+                            phone_number,
+                            "Your image has been saved successfully! Would you like to upload another image?"
+                        )
+
+                        # Ask if they want to upload more
+                        buttons = [
+                            {"id": "upload_more", "title": "Upload More"},
+                            {"id": "done_uploading", "title": "Done"}
+                        ]
+                        await send_button_message(
+                            phone_number,
+                            "Would you like to upload more images?",
+                            buttons
+                        )
+                        return {"status": "success", "message": "Image uploaded successfully"}
+                    else:
+                        # Send error message
+                        await send_whatsapp_message(
+                            phone_number,
+                            f"Sorry, there was an error saving your image: {result.get('message')}"
+                        )
+                        return {"status": "error", "message": result.get("message")}
+                else:
+                    await send_whatsapp_message(
+                        phone_number,
+                        "I couldn't find the image you sent. Please try sending it again."
+                    )
+                    return {"status": "error", "message": "No temporary image found"}
+
+            elif button_id == "no_dont_save":
+                # User doesn't want to save the image
+                # Clean up the session
+                session.pop("temp_image_id", None)
+                session.pop("temp_image_caption", None)
+
+                response = "No problem. The image won't be saved. Is there anything else I can help you with?"
+                await send_whatsapp_message(phone_number, response)
+
                 # Send the main menu again
                 await send_service_menu(phone_number, "AMD Partner Services")
                 return {"status": "success", "message": "Service menu sent"}

@@ -213,6 +213,65 @@ async def send_button_message(to: str, message_text: str, buttons: list):
         logger.error(f"Unexpected error sending button message: {e}")
         return {"status": "error", "message": "Unexpected error"}
 
+async def get_media_url(media_id: str):
+    """
+    Get the URL for a media file from WhatsApp.
+
+    Args:
+        media_id: The WhatsApp media ID
+
+    Returns:
+        dict: Status and URL of the media
+    """
+    phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+    api_key = os.getenv("WHATSAPP_API_KEY")
+
+    url = f"https://graph.facebook.com/v17.0/{media_id}"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+
+            media_data = response.json()
+            media_url = media_data.get("url")
+
+            if not media_url:
+                return {
+                    "status": "error",
+                    "message": "Media URL not found in response"
+                }
+
+            # Now we need to download the actual media using the URL
+            # The URL requires the same authorization
+            media_response = await client.get(media_url, headers=headers)
+            media_response.raise_for_status()
+
+            # Return the URL (we'll download it in the firestore service)
+            return {
+                "status": "success",
+                "url": media_url
+            }
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"WhatsApp API error getting media: {e.response.status_code} - {e.response.text}")
+        return {
+            "status": "error",
+            "message": f"WhatsApp API request failed: {e.response.status_code}"
+        }
+
+    except Exception as e:
+        logger.error(f"Unexpected error getting media URL: {e}")
+        return {
+            "status": "error",
+            "message": f"Unexpected error: {str(e)}"
+        }
+
 # async def send_whatsapp_message(to: str, message: str):
 #     """Send message to WhatsApp"""
 #     phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")

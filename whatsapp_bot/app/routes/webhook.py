@@ -178,23 +178,31 @@ async def handle_image_message(message, phone_number, session):
         )
 
         if result.get("status") == "success":
-            # Send success message
+            # Send success message with storage details
+            storage_path = result.get("data", {}).get("storagePath", "")
+            logger.info(f"Image successfully stored at path: {storage_path}")
+
             await send_whatsapp_message(
                 phone_number,
                 "Your image has been uploaded successfully! You can send more images or type 'menu' to see other services."
             )
-            return {"status": "success", "message": "Image uploaded successfully"}
+            return {"status": "success", "message": "Image uploaded successfully", "storage_path": storage_path}
         else:
             # Send error message with more details
             error_message = result.get('message')
             logger.error(f"Error storing image: {error_message}")
 
-            # Send a more user-friendly message
+            # Send a more user-friendly message based on the error type
             user_message = "Sorry, there was an error uploading your image. Please try again later."
+
             if "download" in error_message.lower():
                 user_message = "Sorry, I had trouble downloading your image. Please try sending it again with a smaller file size."
-            elif "storage" in error_message.lower():
-                user_message = "Sorry, I had trouble saving your image to our storage. Our team has been notified of this issue."
+            elif "storage" in error_message.lower() or "bucket" in error_message.lower() or "404" in error_message:
+                user_message = "Sorry, I had trouble saving your image to our storage system. Our team has been notified of this issue."
+                # Log additional details for storage errors
+                logger.error(f"Storage error details: {error_message}")
+            elif "metadata" in error_message.lower() or "firestore" in error_message.lower():
+                user_message = "Your image was uploaded but we couldn't save the information about it. Please try again."
 
             await send_whatsapp_message(
                 phone_number,

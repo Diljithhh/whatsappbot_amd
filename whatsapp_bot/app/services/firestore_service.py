@@ -12,17 +12,66 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Function to check environment variables
+def check_environment_variables():
+    """Check if all required environment variables are set."""
+    required_vars = [
+        "FIREBASE_CREDENTIALS_BASE64",
+        "WHATSAPP_API_KEY",
+        "WHATSAPP_PHONE_NUMBER_ID",
+        "WHATSAPP_VERIFY_TOKEN"
+    ]
+
+    missing_vars = []
+    for var in required_vars:
+        if not os.getenv(var):
+            missing_vars.append(var)
+
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+        return False
+
+    # Check Firebase bucket
+    firebase_bucket = 'leroc-retail-dev-0987.appspot.com'
+    logger.info(f"Using Firebase Storage bucket: {firebase_bucket}")
+
+    return True
+
+# Check environment variables at startup
+env_check_result = check_environment_variables()
+if not env_check_result:
+    logger.warning("Environment variable check failed. Some functionality may not work correctly.")
+
+# Initialize Firebase
 firebase_creds_base64 = os.getenv("FIREBASE_CREDENTIALS_BASE64")
 if firebase_creds_base64:
-    creds_json = json.loads(base64.b64decode(firebase_creds_base64).decode("utf-8"))
-    cred = credentials.Certificate(creds_json)
-    initialize_app(cred, {
-        'storageBucket': os.getenv('FIREBASE_STORAGE_BUCKET', 'whatsapp-bot-images')
-    })
-    print("Firebase Admin SDK initialized successfully", creds_json)
+    try:
+        creds_json = json.loads(base64.b64decode(firebase_creds_base64).decode("utf-8"))
+        cred = credentials.Certificate(creds_json)
 
-    db = firestore.client()
-    bucket = storage.bucket()
+        # Get bucket name from environment variable with fallback
+        firebase_bucket = os.getenv('FIREBASE_STORAGE_BUCKET', 'leroc-retail-dev-0987.appspot.com')
+        logger.info(f"Using Firebase Storage bucket: {firebase_bucket}")
+
+        initialize_app(cred, {
+            'storageBucket': firebase_bucket
+        })
+        logger.info("Firebase Admin SDK initialized successfully")
+
+        db = firestore.client()
+        bucket = storage.bucket()
+
+        # Verify bucket access
+        try:
+            # Try to list a single blob to verify access
+            next(bucket.list_blobs(max_results=1), None)
+            logger.info(f"Successfully connected to Firebase Storage bucket: {bucket.name}")
+        except Exception as e:
+            logger.error(f"Failed to access Firebase Storage bucket: {str(e)}")
+            logger.warning("Will attempt to create files in the default bucket location")
+    except Exception as e:
+        logger.error(f"Failed to initialize Firebase: {str(e)}")
+        raise ValueError(f"Firebase initialization failed: {str(e)}")
 else:
     raise ValueError("Firebase credentials not found in environment variable.")
 
@@ -100,6 +149,10 @@ async def store_image_in_firestore(phone_number: str, image_url: str, image_id: 
                 "status": "error",
                 "message": "Partner not found in database"
             }
+
+        # Get partner document ID for folder structure
+        partner_doc_id = partner_doc_ref.id
+        logger.info(f"Using partner document ID for storage: {partner_doc_id}")
 
         logger.info(f"Downloading image from WhatsApp for phone_number: {phone_number}")
 
@@ -180,22 +233,50 @@ async def store_image_in_firestore(phone_number: str, image_url: str, image_id: 
         file_extension = "jpg"  # Default to jpg for WhatsApp images
         filename = f"{phone_number}_{timestamp}_{uuid.uuid4().hex}.{file_extension}"
 
-        logger.info(f"Uploading image to Firebase Storage: {filename}")
+        # Create the storage path using the partner document ID
+        storage_path = f"partners/{partner_doc_id}/{filename}"
+        logger.info(f"Uploading image to Firebase Storage: {storage_path}")
+
         # Upload to Firebase Storage
         try:
-            blob = bucket.blob(f"partner_images/{filename}")
+            # Verify bucket exists and is accessible
+            if not bucket or not hasattr(bucket, 'blob'):
+                logger.error("Firebase Storage bucket is not properly initialized")
+                return {
+                    "status": "error",
+                    "message": "Storage system is not properly configured"
+                }
+
+            # Create the blob and upload
+            blob = bucket.blob(storage_path)
+            content_type = response.headers.get('content-type', 'image/jpeg')
+
+            logger.info(f"Uploading image with content type: {content_type}")
             blob.upload_from_string(
                 image_content,
-                content_type=response.headers.get('content-type', 'image/jpeg')
+                content_type=content_type
             )
 
             # Make the blob publicly accessible
             blob.make_public()
+
+            # Get the public URL
+            public_url = blob.public_url
+            logger.info(f"Image uploaded successfully to {public_url}")
+
         except Exception as e:
             logger.error(f"Failed to upload image to Firebase Storage: {str(e)}")
+
+            # Try to provide more specific error information
+            error_message = str(e)
+            if "404" in error_message and "bucket" in error_message.lower():
+                error_message = f"The specified bucket does not exist or is not accessible. Please check your Firebase configuration. Details: {error_message}"
+            elif "403" in error_message:
+                error_message = f"Permission denied when accessing Firebase Storage. Please check your credentials. Details: {error_message}"
+
             return {
                 "status": "error",
-                "message": f"Failed to upload image to storage: {str(e)}"
+                "message": f"Failed to upload image to storage: {error_message}"
             }
 
         logger.info(f"Storing image metadata in Firestore for phone_number: {phone_number}")
@@ -208,8 +289,11 @@ async def store_image_in_firestore(phone_number: str, image_url: str, image_id: 
                 "imageId": image_id,
                 "caption": caption or "",
                 "uploadedAt": firestore.SERVER_TIMESTAMP,
-                "storageUrl": blob.public_url,
-                "filename": filename
+                "storageUrl": public_url,
+                "storagePath": storage_path,
+                "filename": filename,
+                "contentType": content_type,
+                "fileSize": len(image_content)
             }
 
             photo_doc.set(photo_data)
@@ -226,7 +310,8 @@ async def store_image_in_firestore(phone_number: str, image_url: str, image_id: 
             "message": "Image uploaded successfully",
             "data": {
                 "photoId": photo_doc.id,
-                "storageUrl": blob.public_url
+                "storageUrl": public_url,
+                "storagePath": storage_path
             }
         }
 
